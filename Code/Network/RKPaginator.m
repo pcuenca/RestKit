@@ -247,7 +247,9 @@ static NSUInteger RKPaginatorDefaultPerPage = 25;
 
 - (void)cancel
 {
+    [self.objectRequestOperation removeObserver:self forKeyPath:@"isFinished"];
     [self.objectRequestOperation cancel];
+    self.objectRequestOperation = nil;
 }
 
 #pragma mark - iOS 5 proxy attributes
