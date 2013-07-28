@@ -1,66 +1,50 @@
 require 'rubygems'
 require 'bundler/setup'
-require 'xcoder'
-require 'restkit/rake'
+require 'rakeup'
 require 'debugger'
 
-RestKit::Rake::ServerTask.new do |t|
+RakeUp::ServerTask.new do |t|
   t.port = 4567
   t.pid_file = 'Tests/Server/server.pid'
   t.rackup_file = 'Tests/Server/server.ru'
-  t.log_file = 'Tests/Server/server.log'
-
-  t.adapter(:thin) do |thin|
-    thin.config_file = 'Tests/Server/thin.yml'
-  end
+  t.server = :thin
 end
 
 namespace :test do
-  namespace :logic do
-    desc "Run the logic tests for iOS"
-    task :ios do
-      config = Xcode.workspace(:RestKit).scheme(:RestKitTests)
-      builder = config.builder
-      build_dir = File.dirname(config.parent.workspace_root) + '/Build'
-      builder.symroot = build_dir + '/Products'
-      builder.objroot = build_dir
-      builder.test(:sdk => 'iphonesimulator')
-    end
-    
-    desc "Run the logic tests for OS X"
-    task :osx do
-      config = Xcode.workspace(:RestKit).scheme(:RestKitFrameworkTests)
-      builder = config.builder
-      build_dir = File.dirname(config.parent.workspace_root) + '/Build'
-      builder.symroot = build_dir + '/Products'
-      builder.objroot = build_dir
-    	builder.test(:sdk => 'macosx')
-    end
-  end    
+  task :prepare do    
+    system(%Q{mkdir -p "RestKit.xcworkspace/xcshareddata/xcschemes" && cp Tests/Schemes/*.xcscheme "RestKit.xcworkspace/xcshareddata/xcschemes/"})
+  end
   
-  desc "Run the unit tests for iOS and OS X"
-  task :logic => ['logic:ios', 'logic:osx']
+  desc "Run the unit tests for iOS"
+  task :ios => :prepare do
+    $ios_success = system("xctool -workspace RestKit.xcworkspace -scheme RestKitTests -sdk iphonesimulator build build-tests run-tests -test-sdk iphonesimulator")
+  end
   
-  desc "Run all tests for iOS and OS X"
-  task :all do
-    Rake.application.invoke_task("test:logic")
-    unit_status = $?.exitstatus
-    puts "\033[0;31m!! Unit Tests failed with exit status of #{unit_status}" if unit_status != 0
-    puts "\033[0;32m** All Tests executed successfully" if unit_status == 0 #&& integration_status == 0
+  desc "Run the unit tests for OS X"
+  task :osx => :prepare do
+    $osx_success = system("xctool -workspace RestKit.xcworkspace -scheme RestKitFrameworkTests -sdk macosx build build-tests run-tests -test-sdk macosx")
   end
 end
 
 desc 'Run all the RestKit tests'
-task :test => "test:all"
+task :test => ['test:ios', 'test:osx'] do
+  puts "\033[0;31m!! iOS unit tests failed" unless $ios_success
+  puts "\033[0;31m!! OS X unit tests failed" unless $osx_success
+  if $ios_success && $osx_success
+    puts "\033[0;32m** All tests executed successfully"
+  else
+    exit(-1)
+  end
+end
 
-task :default => ["server:autostart", "test:all", "server:autostop"]
+task :default => ["server:autostart", :test, "server:autostop"]
 
 def restkit_version
   @restkit_version ||= ENV['VERSION'] || File.read("VERSION").chomp
 end
 
 def apple_doc_command
-  "/usr/local/bin/appledoc -t ~/Library/Application\\ Support/appledoc -o Docs/API -p RestKit -v #{restkit_version} -c \"RestKit\" " +
+  "/usr/local/bin/appledoc -o Docs/API -p RestKit -v #{restkit_version} -c \"RestKit\" " +
   "--company-id org.restkit --warn-undocumented-object --warn-undocumented-member  --warn-empty-description  --warn-unknown-directive " +
   "--warn-invalid-crossref --warn-missing-arg --no-repeat-first-par "
 end
@@ -88,7 +72,7 @@ task :docs => 'docs:generate'
 namespace :appledoc do
   task :check do
     unless File.exists?('/usr/local/bin/appledoc')
-      "appledoc not found at /usr/local/bin/appledoc: Install via homebrew and try again: `brew install --HEAD appledoc`"
+      puts "appledoc not found at /usr/local/bin/appledoc: Install via homebrew and try again: `brew install --HEAD appledoc`"
       exit 1
     end
   end
