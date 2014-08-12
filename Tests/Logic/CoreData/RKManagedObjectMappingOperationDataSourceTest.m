@@ -307,6 +307,42 @@
     expect([error localizedDescription]).to.equal(@"Cannot map an entity mapping that contains connection mappings with a data source whose managed object cache is nil.");
 }
 
+#pragma mark - Value Transformers
+
+- (void)testCustomAttributeMappingValueTransformer
+{
+    RKManagedObjectStore *managedObjectStore = [RKTestFactory managedObjectStore];
+    NSEntityDescription *entity = [NSEntityDescription entityForName:@"Human" inManagedObjectContext:managedObjectStore.persistentStoreManagedObjectContext];
+    RKEntityMapping *mapping = [[RKEntityMapping alloc] initWithEntity:entity];
+    
+    RKValueTransformer *valueTransformer = [RKBlockValueTransformer valueTransformerWithValidationBlock:^BOOL(__unsafe_unretained Class sourceClass, __unsafe_unretained Class destinationClass) {
+       
+        return ([sourceClass isSubclassOfClass:[NSString class]] && [destinationClass isSubclassOfClass:[NSString class]]);
+    
+    } transformationBlock:^BOOL(id inputValue, __autoreleasing id *outputValue, Class outputValueClass, NSError *__autoreleasing *error) {
+        
+        RKValueTransformerTestInputValueIsKindOfClass(inputValue, [NSString class], error);
+        RKValueTransformerTestOutputValueClassIsSubclassOfClass(outputValueClass, [NSString class], error);
+        
+        *outputValue = [(NSString *)inputValue uppercaseString];
+        return YES;
+    }];
+    RKAttributeMapping *nameMapping = [RKAttributeMapping attributeMappingFromKeyPath:@"name" toKeyPath:@"name"];
+    nameMapping.valueTransformer = valueTransformer;
+    [mapping addAttributeMappingsFromArray:@[ nameMapping ]];
+    mapping.identificationAttributes = @[ @"name" ];
+    
+    NSDictionary *representation = @{ @"name" : @"Blake Watters" };
+    
+    RKManagedObjectMappingOperationDataSource *dataSource = [[RKManagedObjectMappingOperationDataSource alloc] initWithManagedObjectContext:managedObjectStore.persistentStoreManagedObjectContext
+                                                                                                                                      cache:managedObjectStore.managedObjectCache];
+    id object = [dataSource mappingOperation:nil targetObjectForRepresentation:representation withMapping:mapping inRelationship:nil];
+    
+    RKHuman *human = (RKHuman *)object;
+    assertThat(human, isNot(nilValue()));
+    assertThat(human.name, is(equalTo(@"BLAKE WATTERS")));
+}
+
 #pragma mark - Rearrange Me
 
 - (void)testCompoundEntityIdentifierWithFetchRequestCache
@@ -865,7 +901,7 @@
     [cloudMapping addAttributeMappingsFromArray:@[@"name"]];
 
     RKEntityMapping *stormMapping = [RKEntityMapping mappingForEntityForName:@"Storm" inManagedObjectStore:managedObjectStore];
-    [stormMapping addAttributeMappingsFromArray:@[@"name", @"favoriteCatID"]];
+    [stormMapping addAttributeMappingsFromArray:@[@"name"]];
     [stormMapping addRelationshipMappingWithSourceKeyPath:@"clouds" mapping:cloudMapping];
 
     NSArray *cloudsData = [NSArray arrayWithObject:[NSDictionary dictionaryWithObject:@"Nimbus" forKey:@"name"]];
@@ -1019,7 +1055,6 @@
     NSError *error = nil;
     BOOL success = [managedObjectStore.persistentStoreManagedObjectContext save:&error];
     assertThatBool(success, is(equalToBool(YES)));
-    NSLog(@"Failed to save MOC: %@", error);
     assertThat(error, is(nilValue()));
 
     NSFetchRequest *fetchRequest = [NSFetchRequest fetchRequestWithEntityName:@"Parent"];
@@ -1118,7 +1153,7 @@
     NSError *error = nil;
     BOOL success = [operation performMapping:&error];
     assertThatBool(success, is(equalToBool(YES)));
-    expect([human isDeleted]).to.equal(YES);
+    expect([human isDeleted]).will.equal(YES);
 }
 
 - (void)testDeletionOfTombstoneRecordsInMapperOperation
@@ -1140,7 +1175,7 @@
     mapperOperation.mappingOperationDataSource = dataSource;
     BOOL success = [mapperOperation execute:&error];
     assertThatBool(success, is(equalToBool(YES)));
-    expect([human isDeleted]).to.equal(YES);
+    expect([human isDeleted]).will.equal(YES);
 }
 
 - (void)testMappingAPayloadContainingRepeatedObjectsPerformsAcceptablyWithFetchRequestMappingCache
@@ -1317,6 +1352,40 @@
     expect(blake.managedObjectContext).notTo.beNil();
     expect([blake isDeleted]).to.beFalsy();
     expect([blake valueForKey:@"requiredCat"]).to.equal(cat);
+}
+
+- (void)testManagedObjectsMappedWithRequiredRelationshipsThatAreSetByConnectionsAreNotPrematurelyDeletedByPredicateDeletion
+{
+    RKManagedObjectStore *managedObjectStore = [RKTestFactory managedObjectStore];
+    RKFetchRequestManagedObjectCache *managedObjectCache = [RKFetchRequestManagedObjectCache new];
+    RKManagedObjectMappingOperationDataSource *mappingOperationDataSource = [[RKManagedObjectMappingOperationDataSource alloc] initWithManagedObjectContext:managedObjectStore.persistentStoreManagedObjectContext
+                                                                                                                                                      cache:managedObjectCache];
+    mappingOperationDataSource.operationQueue = [NSOperationQueue new];
+    mappingOperationDataSource.operationQueue.maxConcurrentOperationCount = 1;
+
+    NSManagedObject *cat = [NSEntityDescription insertNewObjectForEntityForName:@"Cat" inManagedObjectContext:managedObjectStore.persistentStoreManagedObjectContext];
+    [cat setValue:@(12345) forKey:@"railsID"];
+
+    NSDictionary *representation = @{ @"name": @"Blake Watters", @"favoriteCatID": @(12345) };
+    RKEntityMapping *catMapping = [RKEntityMapping mappingForEntityForName:@"Cat" inManagedObjectStore:managedObjectStore];
+    catMapping.identificationAttributes = @[ @"railsID" ];
+
+    RKEntityMapping *humanMapping = [RKEntityMapping mappingForEntityForName:@"Human" inManagedObjectStore:managedObjectStore];
+    humanMapping.deletionPredicate = [NSPredicate predicateWithFormat:@"favoriteCat == nil"];
+    [humanMapping addAttributeMappingsFromDictionary:@{ @"name": @"name" }];
+    [humanMapping addPropertyMapping:[RKAttributeMapping attributeMappingFromKeyPath:@"favoriteCatID" toKeyPath:@"favoriteCatID"]];
+    [humanMapping addConnectionForRelationship:@"favoriteCat" connectedBy:@{ @"favoriteCatID": @"railsID" }];
+
+    RKMapperOperation *mapper = [[RKMapperOperation alloc] initWithRepresentation:representation mappingsDictionary:@{ [NSNull null]: humanMapping }];
+    mapper.mappingOperationDataSource = mappingOperationDataSource;
+    [mapper start];
+    [mappingOperationDataSource.operationQueue waitUntilAllOperationsAreFinished];
+
+    RKHuman *blake = [mapper.mappingResult firstObject];
+    expect(blake.name).to.equal(@"Blake Watters");
+    expect(blake.managedObjectContext).notTo.beNil();
+    expect([blake isDeleted]).to.beFalsy();
+    expect([blake valueForKey:@"favoriteCat"]).to.equal(cat);
 }
 
 - (void)testManagedObjectsMappedWithRelationshipsThatAreSetByConnectionsWithInMemoryCache

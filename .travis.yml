@@ -1,8 +1,7 @@
 language: objective-c
-before_install:
-    - brew update
-    - brew install xctool --HEAD
+rvm: 2.0.0
+install:
     - bundle install
+    - bundle exec pod install
 script:
-    - rake server:start
-    - rake test
+    - bundle exec rake ci
